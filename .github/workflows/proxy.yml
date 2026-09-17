@@ -12,7 +12,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dante-server curl
           
-          # Install bore (Simple & free TCP tunnel)
+          # Install bore
           curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
           sudo mv bore /usr/local/bin/
 
@@ -42,14 +42,14 @@ jobs:
           WORKER_USER: ${{ secrets.WORKER_USER }}
           WORKER_PASS: ${{ secrets.WORKER_PASS }}
         run: |
-          # Start Dante SOCKS5
+          # Restart Dante Proxy
           sudo systemctl restart danted
 
-          # Start Bore TCP Tunnel
+          # Start Bore Tunnel
           bore local 1080 --to bore.pub > bore.log 2>&1 &
           sleep 5
 
-          # Extract Public TCP Address (e.g. bore.pub:32145)
+          # Extract Port
           PORT=$(grep -oE 'listening at bore.pub:[0-9]+' bore.log | awk -F':' '{print $2}')
           
           if [ -z "$PORT" ]; then
@@ -61,7 +61,7 @@ jobs:
           PROXY_URL="bore.pub:$PORT"
           echo "Generated TCP Proxy: $PROXY_URL"
 
-          # Clean Endpoint Path
+          # Format Worker Endpoint
           CLEAN_URL=$(echo "$WORKER_URL" | sed 's/\/*$//')
           if [[ "$CLEAN_URL" != */update ]]; then
             TARGET_ENDPOINT="${CLEAN_URL}/update"
