@@ -1,0 +1,71 @@
+name: Temporary SOCKS5 Proxy (No Auth Tunnel)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  start-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Dante SOCKS Server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dante-server curl
+
+      - name: Configure SOCKS5 Server
+        run: |
+          cat << 'EOF' | sudo tee /etc/danted.conf
+          logoutput: stderr
+          internal: 0.0.0.0 port = 1080
+          external: eth0
+          socksmethod: none
+          clientmethod: none
+
+          client pass {
+              from: 0.0.0.0/0 to: 0.0.0.0/0
+              log: connect disconnect error
+          }
+
+          socks pass {
+              from: 0.0.0.0/0 to: 0.0.0.0/0
+              log: connect disconnect error
+          }
+          EOF
+
+      - name: Start Services & Send Public Address to Worker
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_USER: ${{ secrets.WORKER_USER }}
+          WORKER_PASS: ${{ secrets.WORKER_PASS }}
+        run: |
+          # Start Dante SOCKS5 Proxy
+          sudo systemctl restart danted
+
+          # SSH Tunnel using Pinggy (No auth/account required)
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 a.pinggy.io > pinggy.log 2>&1 &
+          
+          # Wait for tunnel connection
+          sleep 6
+
+          # Parse TCP host:port from logs
+          PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.a\.pinggy\.io:[0-9]+' pinggy.log | head -n 1)
+
+          if [ -z "$PROXY_URL" ]; then
+            echo "Failed to get tunnel endpoint, retrying with Serveo..."
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 serveo.net > serveo.log 2>&1 &
+            sleep 6
+            PROXY_URL=$(grep -oE 'Forwarding TCP traffic from [a-zA-Z0-9.-]+:[0-9]+' serveo.log | grep -oE '[a-zA-Z0-9.-]+:[0-9]+' | head -n 1)
+          fi
+
+          echo "Generated Public Proxy: $PROXY_URL"
+
+          # Send to Cloudflare Worker
+          curl -s -X POST "$WORKER_URL/update" \
+               -u "$WORKER_USER:$WORKER_PASS" \
+               -H "Content-Type: application/json" \
+               -d "{\"proxy_url\": \"$PROXY_URL\"}"
+
+      - name: Keep Tunnel Alive
+        run: |
+          # Keep tunnel running (Set reasonable duration to avoid runner bans)
+          sleep 4h
