@@ -7,10 +7,11 @@ jobs:
   start-proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Dante SOCKS Server
+      - name: Install Dante & LocalTunnel
         run: |
           sudo apt-get update
           sudo apt-get install -y dante-server curl
+          sudo npm install -g localtunnel
 
       - name: Configure SOCKS5 Server
         run: |
@@ -41,31 +42,28 @@ jobs:
           # Start Dante SOCKS5 Proxy
           sudo systemctl restart danted
 
-          # SSH Tunnel using Pinggy (No auth/account required)
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 a.pinggy.io > pinggy.log 2>&1 &
-          
-          # Wait for tunnel connection
-          sleep 6
+          # Start LocalTunnel for port 1080
+          lt --port 1080 > lt.log 2>&1 &
+          sleep 5
 
-          # Parse TCP host:port from logs
-          PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.a\.pinggy\.io:[0-9]+' pinggy.log | head -n 1)
+          # Extract URL from logs
+          PROXY_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' lt.log | head -n 1 | sed 's/https:\/\///')
 
           if [ -z "$PROXY_URL" ]; then
-            echo "Failed to get tunnel endpoint, retrying with Serveo..."
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 serveo.net > serveo.log 2>&1 &
-            sleep 6
-            PROXY_URL=$(grep -oE 'Forwarding TCP traffic from [a-zA-Z0-9.-]+:[0-9]+' serveo.log | grep -oE '[a-zA-Z0-9.-]+:[0-9]+' | head -n 1)
+            echo "LocalTunnel failed, trying SSH fallback..."
+            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:1080 nokey@localhost.run > lhr.log 2>&1 &
+            sleep 5
+            PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.lhr\.life' lhr.log | head -n 1)
           fi
 
           echo "Generated Public Proxy: $PROXY_URL"
 
           # Send to Cloudflare Worker
-          curl -s -X POST "$WORKER_URL/update" \
+          curl -s -X POST "$WORKER_URL" \
                -u "$WORKER_USER:$WORKER_PASS" \
                -H "Content-Type: application/json" \
                -d "{\"proxy_url\": \"$PROXY_URL\"}"
 
       - name: Keep Tunnel Alive
         run: |
-          # Keep tunnel running (Set reasonable duration to avoid runner bans)
           sleep 4h
