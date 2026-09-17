@@ -7,13 +7,14 @@ jobs:
   start-proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Dante & Ngrok
+      - name: Install Dante SOCKS Server & Bore
         run: |
           sudo apt-get update
-          sudo apt-get install -y dante-server curl jq
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update && sudo apt-get install ngrok
+          sudo apt-get install -y dante-server curl
+          
+          # Install bore (Simple & free TCP tunnel)
+          curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz
+          sudo mv bore /usr/local/bin/
 
       - name: Configure SOCKS5 Server
         run: |
@@ -40,28 +41,27 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_USER: ${{ secrets.WORKER_USER }}
           WORKER_PASS: ${{ secrets.WORKER_PASS }}
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
           # Start Dante SOCKS5
           sudo systemctl restart danted
 
-          # Start Ngrok TCP Tunnel
-          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
-          ngrok tcp 1080 --log=stdout > ngrok.log 2>&1 &
+          # Start Bore TCP Tunnel
+          bore local 1080 --to bore.pub > bore.log 2>&1 &
           sleep 5
 
-          # Extract TCP Address via Ngrok Local API
-          PROXY_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' | sed 's/tcp:\/\///')
-
-          if [ -z "$PROXY_URL" ] || [ "$PROXY_URL" == "null" ]; then
-            echo "Ngrok failed to start!"
-            cat ngrok.log
+          # Extract Public TCP Address (e.g. bore.pub:32145)
+          PORT=$(grep -oE 'listening at bore.pub:[0-9]+' bore.log | awk -F':' '{print $2}')
+          
+          if [ -z "$PORT" ]; then
+            echo "Bore tunnel failed!"
+            cat bore.log
             exit 1
           fi
 
+          PROXY_URL="bore.pub:$PORT"
           echo "Generated TCP Proxy: $PROXY_URL"
 
-          # Endpoint Formatting
+          # Clean Endpoint Path
           CLEAN_URL=$(echo "$WORKER_URL" | sed 's/\/*$//')
           if [[ "$CLEAN_URL" != */update ]]; then
             TARGET_ENDPOINT="${CLEAN_URL}/update"
@@ -69,7 +69,7 @@ jobs:
             TARGET_ENDPOINT="$CLEAN_URL"
           fi
 
-          # Send to Worker
+          # Send to Cloudflare Worker
           curl -s -X POST "$TARGET_ENDPOINT" \
                -u "$WORKER_USER:$WORKER_PASS" \
                -H "Content-Type: application/json" \
