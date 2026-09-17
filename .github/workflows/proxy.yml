@@ -7,10 +7,13 @@ jobs:
   start-proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Dante SOCKS Server
+      - name: Install Dante & Ngrok
         run: |
           sudo apt-get update
-          sudo apt-get install -y dante-server curl
+          sudo apt-get install -y dante-server curl jq
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update && sudo apt-get install ngrok
 
       - name: Configure SOCKS5 Server
         run: |
@@ -37,27 +40,28 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_USER: ${{ secrets.WORKER_USER }}
           WORKER_PASS: ${{ secrets.WORKER_PASS }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          # Start Dante SOCKS5 Proxy
+          # Start Dante SOCKS5
           sudo systemctl restart danted
 
-          # Start Pinggy TCP Tunnel (Strictly TCP for SOCKS5)
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 tcp.pinggy.io > pinggy.log 2>&1 &
-          sleep 8
+          # Start Ngrok TCP Tunnel
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          ngrok tcp 1080 --log=stdout > ngrok.log 2>&1 &
+          sleep 5
 
-          # Parse Host and Port
-          PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.a\.pinggy\.io:[0-9]+' pinggy.log | head -n 1)
+          # Extract TCP Address via Ngrok Local API
+          PROXY_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url' | sed 's/tcp:\/\///')
 
-          if [ -z "$PROXY_URL" ]; then
-            echo "Pinggy failed, trying Playit.gg / Fallback TCP..."
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 nokey@localhost.run > lhr.log 2>&1 &
-            sleep 8
-            PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.lhr\.life:[0-9]+' lhr.log | head -n 1)
+          if [ -z "$PROXY_URL" ] || [ "$PROXY_URL" == "null" ]; then
+            echo "Ngrok failed to start!"
+            cat ngrok.log
+            exit 1
           fi
 
           echo "Generated TCP Proxy: $PROXY_URL"
 
-          # Endpoint Cleaning
+          # Endpoint Formatting
           CLEAN_URL=$(echo "$WORKER_URL" | sed 's/\/*$//')
           if [[ "$CLEAN_URL" != */update ]]; then
             TARGET_ENDPOINT="${CLEAN_URL}/update"
@@ -65,7 +69,7 @@ jobs:
             TARGET_ENDPOINT="$CLEAN_URL"
           fi
 
-          # Send to Cloudflare Worker
+          # Send to Worker
           curl -s -X POST "$TARGET_ENDPOINT" \
                -u "$WORKER_USER:$WORKER_PASS" \
                -H "Content-Type: application/json" \
