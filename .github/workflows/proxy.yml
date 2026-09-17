@@ -7,11 +7,10 @@ jobs:
   start-proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Dante & LocalTunnel
+      - name: Install Dante SOCKS Server
         run: |
           sudo apt-get update
           sudo apt-get install -y dante-server curl
-          sudo npm install -g localtunnel
 
       - name: Configure SOCKS5 Server
         run: |
@@ -42,24 +41,32 @@ jobs:
           # Start Dante SOCKS5 Proxy
           sudo systemctl restart danted
 
-          # Start LocalTunnel for port 1080
-          lt --port 1080 > lt.log 2>&1 &
-          sleep 5
+          # Start Pinggy TCP Tunnel (Strictly TCP for SOCKS5)
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 tcp.pinggy.io > pinggy.log 2>&1 &
+          sleep 8
 
-          # Extract URL from logs
-          PROXY_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' lt.log | head -n 1 | sed 's/https:\/\///')
+          # Parse Host and Port
+          PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.a\.pinggy\.io:[0-9]+' pinggy.log | head -n 1)
 
           if [ -z "$PROXY_URL" ]; then
-            echo "LocalTunnel failed, trying SSH fallback..."
-            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:1080 nokey@localhost.run > lhr.log 2>&1 &
-            sleep 5
-            PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.lhr\.life' lhr.log | head -n 1)
+            echo "Pinggy failed, trying Playit.gg / Fallback TCP..."
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 0:localhost:1080 nokey@localhost.run > lhr.log 2>&1 &
+            sleep 8
+            PROXY_URL=$(grep -oE '[a-zA-Z0-9.-]+\.lhr\.life:[0-9]+' lhr.log | head -n 1)
           fi
 
-          echo "Generated Public Proxy: $PROXY_URL"
+          echo "Generated TCP Proxy: $PROXY_URL"
+
+          # Endpoint Cleaning
+          CLEAN_URL=$(echo "$WORKER_URL" | sed 's/\/*$//')
+          if [[ "$CLEAN_URL" != */update ]]; then
+            TARGET_ENDPOINT="${CLEAN_URL}/update"
+          else
+            TARGET_ENDPOINT="$CLEAN_URL"
+          fi
 
           # Send to Cloudflare Worker
-          curl -s -X POST "$WORKER_URL" \
+          curl -s -X POST "$TARGET_ENDPOINT" \
                -u "$WORKER_USER:$WORKER_PASS" \
                -H "Content-Type: application/json" \
                -d "{\"proxy_url\": \"$PROXY_URL\"}"
